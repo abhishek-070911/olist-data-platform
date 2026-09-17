@@ -4,7 +4,7 @@ Source: [Kaggle, olistbr/brazilian-ecommerce](https://www.kaggle.com/datasets/ol
 
 Profiled by: Abhishek Patra
 
-Last updated: 2026-09-14
+Last updated: 2026-09-17
 
 ## 1.Inventory
 
@@ -12,6 +12,7 @@ Last updated: 2026-09-14
 |------|------|------|-----------|-------------|-----------|
 | olist_sellers_dataset.csv | 3095 | 4 | 0 | seller_id | Yes - 3095 Distinct and not null values |
 | olist_customers_dataset.csv | 99441 | 5 | 0 | customer_id | Yes — 99,441 distinct, but order-scoped (see F5) |
+| olist_orders_dataset.csv | 99441 | 8 | 3 | order_id | Yes — 99,441 distinct |
 
 
 ### Column cardinality — sellers
@@ -30,6 +31,18 @@ Last updated: 2026-09-14
 | customer_zip_code_prefix | 14994 | not unique per customer |
 | customer_city | 4119 | not checked for variant spellings (see F4) |
 | customer_state | 27 | more codes than seller_state (23) |
+
+### Column cardinality — orders
+| Column | Distinct | Note |
+|--------|----------|------|
+| order_id | 99441 | Unique order id |
+| customer_id | 99441 | Same number of rows as of customers table |
+| order_status | 8 | approved,canceled,created,delivered,invoiced,processing,shipped,unavailable |
+| order_purchase_timestamp | 98875 | 566 rows share timedtamp with another order |
+| order_approved_at | 90733 | 160 Null rows |
+| order_delivered_carrier_date | 81018 | 1783 Null rows |
+| order_delivered_customer_date | 95664 | 2965 Null rows |
+| order_estimated_delivery_date| 459 | Date only no time component like other 4 |
 
 ## 2.Findings
 
@@ -118,14 +131,83 @@ Last updated: 2026-09-14
 
 **Action :** Build the state/geography dimension from the union of seller_state and customer_state. Add a DQ test asserting every state value in both source tables resolves to a row in that dimension.
 
+### F8 - One row represents one order
+
+**Table :** olist_orders_dataset.csv
+
+**Checked :** Compared distinct order_id and distinct customer_id against row count.
+
+**Found :** 99,441 rows, 99,441 distinct order_id, 99,441 distinct customer_id. The customer_id sets in orders and customers match exactly in both directions — no orphans either way.
+
+**Means :** One row per order. customer_id is unique per order here, confirming from data what the customers table suggested — it identifies an order, not a person.
+
+**Action :** Use order_id as the primary key. Carry customer_id for traceability back to the source, not as a customer reference — the customer key is customer_unique_id.
+
+### F9 - 160 orders have no approval timestamp
+
+**Table :** olist_orders_dataset.csv
+
+**Checked :** Counted nulls in order_approved_at, then broke those rows down by order_status.
+
+**Found :** 160 rows have a null order_approved_at. Status breakdown: canceled order 141, delivered order 14, created order 5. 141 of them are cancelled orders where all three downstream date columns are also null.
+
+**Means :** Per the Kaggle data dictionary, order_approved_at records payment approval. A null means the order never reached that stage. Cancellation (141) and created (5) account for 146 of these, where a null is expected. The remaining 14 have status 'delivered' — an order cannot be delivered without its payment being approved. All 14 were purchased in a narrow window — twelve on 17-19 Feb 2017, two on 19 Jan 2017 — suggesting a one-off processing failure rather than a recurring problem. All 14 have complete carrier and customer delivery timestamps, so the orders were fulfilled normally; only the approval record is missing.
+
+**Action :** Treat null order_approved_at as "not approved", not as missing data — do not drop these rows in Silver. Add a DQ test asserting every order with status 'delivered' has a non-null order_approved_at; the 14 rows failing it today are a known defect.
+
+### F10 - 1,783 orders have no carrier handover timestamp
+
+**Table :** olist_orders_dataset.csv
+
+**Checked :** Counted nulls in order_delivered_carrier_date, then broke those rows down by order_status.
+
+**Found :** 1,783 rows have a null order_delivered_carrier_date. Status breakdown: unavailable 609, canceled 550, invoiced 314, processing 301, created 5, approved 2, delivered 2. The breakdown sums to 1,783.
+
+**Means :** 1,781 of these sit at statuses before dispatch, where a null is expected — the order never reached the carrier. The 2 rows with status 'delivered' are inconsistent: an order cannot be delivered without being handed to a carrier.
+
+**Action :** Treat null carrier date as expected for pre-dispatch statuses. Add a DQ test asserting every order with status 'delivered' has a non-null order_delivered_carrier_date — the 2 rows failing it today are a known defect and must be handled explicitly in Silver, not silently dropped.
+
+### F11 - 2,965 orders have no customer delivery timestamp
+
+**Table :** olist_orders_dataset.csv
+
+**Checked :** Counted nulls in order_delivered_customer_date, then broke those rows down by order_status.
+
+**Found :** 2,965 rows (3.0%) have a null order_delivered_customer_date. Status breakdown: shipped 1107, canceled 619, unavailable 609, invoiced 314, processing 301, delivered 8, created 5, approved 2. The breakdown sums to 2,965.
+
+**Means :** The pre-delivery statuses are expected. The 8 rows with status 'delivered' are inconsistent — the status claims delivery with no timestamp recording it. These 8, offset by the 6 cancelled orders that do carry a delivery timestamp (F12), account for the difference between 2,965 nulls and the 2,963 orders whose status is not 'delivered'.
+
+**Action :** Add a DQ test asserting every order with status 'delivered' has a non-null order_delivered_customer_date. Exclude these rows from delivery-time calculations rather than treating them as zero-duration.
+
+### F12 - 6 cancelled orders have delivery timestamps
+
+**Table :** olist_orders_dataset.csv
+
+**Checked :** Filtered for order_status = 'canceled' with a non-null order_delivered_customer_date.
+
+**Found :** 6 orders. All have both carrier and customer delivery timestamps. Five were purchased in October 2016, one in February 2018.
+
+**Means :** These orders were dispatched and delivered, then marked cancelled. order_status and the delivery timestamps disagree. The October 2016 clustering suggests early-period data issues rather than a recurring problem.
+
+**Action :** Decide in Silver which column wins — status or timestamps — and apply it consistently. Add a DQ test asserting no cancelled order has a delivery timestamp.
+
+### F13 - order_status and the timestamp columns disagree on a small number of orders
+
+**Table :** olist_orders_dataset.csv
+
+**Checked :** Counted distinct order_id failing any of the four consistency conditions found in F9-F12.
+
+**Found :** 29 distinct orders. By condition:
+- 14 with status 'delivered' and no order_approved_at (F9)
+- 2 with status 'delivered' and no order_delivered_carrier_date (F10)
+- 8 with status 'delivered' and no order_delivered_customer_date (F11)
+- 6 with status 'canceled' and a delivery timestamp (F12)
+
+These sum to 30; one order fails two conditions (delivered, with both
+carrier and customer timestamps missing), giving 29 distinct.
+
+**Means :** Two sources of truth in one table disagree. The disagreement runs both ways — statuses claiming progress the timestamps don't record, and timestamps recording progress the status contradicts. Affected rows are under 0.1% of the table, but they sit in the columns every delivery and fulfilment metric is built from.
+
+**Action :** Record in an ADR which column is authoritative when they conflict, and apply that choice consistently across all Silver logic — this is one decision, not four. Implement the four DQ tests from F9-F12. Route rows failing any of them to a separate review table rather than dropping them, so the conflict stays visible instead of disappearing.
+
 ## 3.Open Questions
-
-### Q1- Does one row represent one order?
-
-**Table :** olist_customers_dataset.csv.
-
-**Observed :** customer_id is unique per row. Kaggle documentation describes it as order-scoped; this is unverified against the orders table.
-
-**Why deferred :** Needs to profile orders table.
-
-**Resolve by :** after profiling orders
