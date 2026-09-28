@@ -4,7 +4,7 @@ Source: [Kaggle, olistbr/brazilian-ecommerce](https://www.kaggle.com/datasets/ol
 
 Profiled by: Abhishek Patra
 
-Last updated: 2026-09-17
+Last updated: 2026-09-27
 
 ## 1.Inventory
 
@@ -13,6 +13,7 @@ Last updated: 2026-09-17
 | olist_sellers_dataset.csv | 3095 | 4 | 0 | seller_id | Yes - 3095 Distinct and not null values |
 | olist_customers_dataset.csv | 99441 | 5 | 0 | customer_id | Yes — 99,441 distinct, but order-scoped (see F5) |
 | olist_orders_dataset.csv | 99441 | 8 | 3 | order_id | Yes — 99,441 distinct |
+| olist_order_items_dataset.csv | 112650 | 7 | 0 | order_id,order_item_id | Yes-112650 Distinct and not null values |
 
 
 ### Column cardinality — sellers
@@ -38,11 +39,22 @@ Last updated: 2026-09-17
 | order_id | 99441 | Unique order id |
 | customer_id | 99441 | Same number of rows as of customers table |
 | order_status | 8 | approved,canceled,created,delivered,invoiced,processing,shipped,unavailable |
-| order_purchase_timestamp | 98875 | 566 rows share timedtamp with another order |
+| order_purchase_timestamp | 98875 | 566 rows share timestamp with another order |
 | order_approved_at | 90733 | 160 Null rows |
 | order_delivered_carrier_date | 81018 | 1783 Null rows |
 | order_delivered_customer_date | 95664 | 2965 Null rows |
 | order_estimated_delivery_date| 459 | Date only no time component like other 4 |
+
+### Column cardinality — items
+| Column | Distinct | Note |
+|--------|----------|------|
+| order_id | 98666 | repeats — up to 21 rows per order; 775 orders have no items (see F15) |
+| order_item_id | 21 | sequence number within an order; max 21 |
+| product_id | 32951 | pnot yet checked against the products table |
+| seller_id | 3095 | same count as sellers table |
+| shipping_limit_date | 93318 | max 2020-04-09, beyond every other date in the dataset |
+| price | 5968 | min 0.85, max 6,735.00 — no zero or negative prices |
+| freight_value | 6999 | min 0.00 — zero-freight rows not yet counted |
 
 ## 2.Findings
 
@@ -115,7 +127,7 @@ Last updated: 2026-09-17
 
 **Found :** 2,997 of 96,096 customer_unique_id values (3.1%) appear on more than one row.
 
-**Means :** customer_unique_id repeats within this table while customer_id does not. Whether repeated rows represent repeated purchase depends on row-per-order claim which is unverified (see Q1).
+**Means :** customer_unique_id repeats within this table while customer_id does not. It is one row per order verified. (See F8)
 
 **Action :** Group on customer_unique_id, not customer_id, for any customer-level count or aggregation — the two differ by 3,345 (99,441 vs 96,096).
 
@@ -149,7 +161,7 @@ Last updated: 2026-09-17
 
 **Checked :** Counted nulls in order_approved_at, then broke those rows down by order_status.
 
-**Found :** 160 rows have a null order_approved_at. Status breakdown: canceled order 141, delivered order 14, created order 5. 141 of them are cancelled orders where all three downstream date columns are also null.
+**Found :** 160 rows have a null order_approved_at. Status breakdown: canceled 141, delivered 14, created 5. 141 of them are cancelled orders where all three downstream date columns are also null.
 
 **Means :** Per the Kaggle data dictionary, order_approved_at records payment approval. A null means the order never reached that stage. Cancellation (141) and created (5) account for 146 of these, where a null is expected. The remaining 14 have status 'delivered' — an order cannot be delivered without its payment being approved. All 14 were purchased in a narrow window — twelve on 17-19 Feb 2017, two on 19 Jan 2017 — suggesting a one-off processing failure rather than a recurring problem. All 14 have complete carrier and customer delivery timestamps, so the orders were fulfilled normally; only the approval record is missing.
 
@@ -209,5 +221,27 @@ carrier and customer timestamps missing), giving 29 distinct.
 **Means :** Two sources of truth in one table disagree. The disagreement runs both ways — statuses claiming progress the timestamps don't record, and timestamps recording progress the status contradicts. Affected rows are under 0.1% of the table, but they sit in the columns every delivery and fulfilment metric is built from.
 
 **Action :** Record in an ADR which column is authoritative when they conflict, and apply that choice consistently across all Silver logic — this is one decision, not four. Implement the four DQ tests from F9-F12. Route rows failing any of them to a separate review table rather than dropping them, so the conflict stays visible instead of disappearing.
+
+### F14 - order_items has one row per item within an order
+
+**Checked :** Counted duplicate (order_id, order_item_id) pairs, and checked each column on its own for uniqueness.
+
+**Found :** 112,650 rows, 0 duplicate pairs. Neither column is unique alone — order_id has 98,666 distinct values, order_item_id has 21.
+
+**Means :** The pair is a valid composite key, and a minimal one: drop either column and uniqueness fails. An order with three items has three rows.
+
+**Action :** Use (order_id, order_item_id) as the key in Silver. Any order-level number must be aggregated to order_id first.
+
+### F15 - 775 orders have no line items
+
+**Table :** olist_order_items_dataset.csv,olist_orders_dataset.csv
+
+**Checked :** Found orders with no matching order_id in order_items using a left join from orders to items, filtered on null order_item_id. Broke the result down by order_status and compared each status against its total in orders.
+
+**Found :** 775 orders (0.8%) have no items. By status, with the share of that status affected: created 5 (100%), unavailable 603 (99%), canceled 164 (26%), invoiced 2 (<1%), shipped 1 (<0.1%). No delivered, processing or approved order is missing items.
+
+**Means :** 772 of these are orders that never progressed — created, unavailable, or cancelled before items were attached — so an empty order is expected. The 3 invoiced and shipped orders are inconsistent. All three were purchased on 5 October 2016 (a68ce168… shipped, handed to a carrier with nothing in it; 2ce96831… and e04f1da1… invoiced), the same early period as F12. No completed sale is affected.
+
+**Action :** Always count orders from the orders table, never from a table joined to items. An inner join quietly drops these 775 orders, so any order count, cancellation rate or unavailability rate built on it would come out too low. Also add a check that every delivered, shipped or invoiced order has at least one item. Three orders fail it today — keep them visible as known issues rather than dropping them.
 
 ## 3.Open Questions
