@@ -4,7 +4,7 @@ Source: [Kaggle, olistbr/brazilian-ecommerce](https://www.kaggle.com/datasets/ol
 
 Profiled by: Abhishek Patra
 
-Last updated: 2026-09-27
+Last updated: 2026-09-29
 
 ## 1.Inventory
 
@@ -13,7 +13,7 @@ Last updated: 2026-09-27
 | olist_sellers_dataset.csv | 3095 | 4 | 0 | seller_id | Yes - 3095 Distinct and not null values |
 | olist_customers_dataset.csv | 99441 | 5 | 0 | customer_id | Yes — 99,441 distinct, but order-scoped (see F5) |
 | olist_orders_dataset.csv | 99441 | 8 | 3 | order_id | Yes — 99,441 distinct |
-| olist_order_items_dataset.csv | 112650 | 7 | 0 | order_id,order_item_id | Yes-112650 Distinct and not null values |
+| olist_order_items_dataset.csv | 112650 | 7 | 0 | order_id,order_item_id | Yes — 112,650 distinct pairs, no nulls |
 
 
 ### Column cardinality — sellers
@@ -49,12 +49,12 @@ Last updated: 2026-09-27
 | Column | Distinct | Note |
 |--------|----------|------|
 | order_id | 98666 | repeats — up to 21 rows per order; 775 orders have no items (see F15) |
-| order_item_id | 21 | sequence number within an order; max 21 |
-| product_id | 32951 | pnot yet checked against the products table |
-| seller_id | 3095 | same count as sellers table |
-| shipping_limit_date | 93318 | max 2020-04-09, beyond every other date in the dataset |
+| order_item_id | 21 | position within an order; numbered 1, 2, 3… up to the order's row count, no gaps; max 21 (see F14) |
+| product_id | 32951 | not yet checked against the products table (see Q1) |
+| seller_id | 3095 | same 3,095 sellers as the sellers table, both directions (see F17) |
+| shipping_limit_date | 93318 | max 2020-04-09, later than every date in the orders table — not investigated yet (see Q4) |
 | price | 5968 | min 0.85, max 6,735.00 — no zero or negative prices |
-| freight_value | 6999 | min 0.00 — zero-freight rows not yet counted |
+| freight_value | 6999 | min 0.00 — 383 rows in 339 orders have zero freight (see Q3) |
 
 ## 2.Findings
 
@@ -161,7 +161,7 @@ Last updated: 2026-09-27
 
 **Checked :** Counted nulls in order_approved_at, then broke those rows down by order_status.
 
-**Found :** 160 rows have a null order_approved_at. Status breakdown: canceled 141, delivered 14, created 5. 141 of them are cancelled orders where all three downstream date columns are also null.
+**Found :** 160 rows have a null order_approved_at. Status breakdown: canceled 141, delivered 14, created 5.
 
 **Means :** Per the Kaggle data dictionary, order_approved_at records payment approval. A null means the order never reached that stage. Cancellation (141) and created (5) account for 146 of these, where a null is expected. The remaining 14 have status 'delivered' — an order cannot be delivered without its payment being approved. All 14 were purchased in a narrow window — twelve on 17-19 Feb 2017, two on 19 Jan 2017 — suggesting a one-off processing failure rather than a recurring problem. All 14 have complete carrier and customer delivery timestamps, so the orders were fulfilled normally; only the approval record is missing.
 
@@ -224,17 +224,19 @@ carrier and customer timestamps missing), giving 29 distinct.
 
 ### F14 - order_items has one row per item within an order
 
-**Checked :** Counted duplicate (order_id, order_item_id) pairs, and checked each column on its own for uniqueness.
+**Table :** olist_order_items_dataset.csv
 
-**Found :** 112,650 rows, 0 duplicate pairs. Neither column is unique alone — order_id has 98,666 distinct values, order_item_id has 21.
+**Checked :** Counted duplicate (order_id, order_item_id) pairs, checked each column on its own for uniqueness, and compared the min, max and count of order_item_id within each order.
 
-**Means :** The pair is a valid composite key, and a minimal one: drop either column and uniqueness fails. An order with three items has three rows.
+**Found :** 112,650 rows, 0 duplicate pairs. Neither column is unique alone — order_id has 98,666 distinct values, order_item_id has 21. Within every order, order_item_id runs from 1 to the number of rows, with no gaps.
+
+**Means :** The pair is a valid composite key, and a minimal one: drop either column and uniqueness fails. An order with three items has three rows — even when all three are the same product (see F16).
 
 **Action :** Use (order_id, order_item_id) as the key in Silver. Any order-level number must be aggregated to order_id first.
 
 ### F15 - 775 orders have no line items
 
-**Table :** olist_order_items_dataset.csv,olist_orders_dataset.csv
+**Table :** olist_order_items_dataset.csv, olist_orders_dataset.csv
 
 **Checked :** Found orders with no matching order_id in order_items using a left join from orders to items, filtered on null order_item_id. Broke the result down by order_status and compared each status against its total in orders.
 
@@ -244,4 +246,52 @@ carrier and customer timestamps missing), giving 29 distinct.
 
 **Action :** Always count orders from the orders table, never from a table joined to items. An inner join quietly drops these 775 orders, so any order count, cancellation rate or unavailability rate built on it would come out too low. Also add a check that every delivered, shipped or invoiced order has at least one item. Three orders fail it today — keep them visible as known issues rather than dropping them.
 
+### F16 - One row is one unit: the same product repeats within an order
+
+**Table :** olist_order_items_dataset.csv
+
+**Checked :** Counted rows repeating an (order_id, product_id) pair, then counted distinct seller_id, shipping_limit_date, price and freight_value within each repeated pair.
+
+**Found :** 7,088 order–product pairs appear on more than one row, adding 10,225 extra rows, across 6,968 orders (7.1% of orders with items). Within every pair, seller, shipping limit, price and freight are identical; only order_item_id changes.
+
+**Means :** There is no quantity column. Three units of a product are three rows. A row is one unit, not one product line.
+
+**Action :** Keep the unit-level grain in Silver. Derive quantity as the row count per (order_id, product_id). Count units with a row count and products with a distinct count of product_id — the two differ in 6,968 orders. Sum price over rows for an order's item value; never multiply price by the derived quantity — each row is already one unit.
+
+### F17 - order_items links cleanly to orders and sellers
+
+**Table :** olist_order_items_dataset.csv, olist_orders_dataset.csv, olist_sellers_dataset.csv
+
+**Checked :** Compared the set of order_id in items against orders, and the set of seller_id in items against sellers, in both directions.
+
+**Found :** 0 order_id in items are missing from orders; the other direction is F15's 775. 0 seller_id in items are missing from sellers, and 0 sellers have no items — both tables hold the same 3,095 sellers.
+
+**Means :** Every item belongs to a known order and a known seller, and every seller in the sellers table has sold at least one item.
+
+**Action :** Add DQ tests in Silver: every order_items.order_id must exist in orders, and every order_items.seller_id in sellers. Both are 0 today, so any failure later means new bad data — route those rows to quarantine rather than dropping them.
+
+### F18 - An order can contain items from more than one seller
+
+**Table :** olist_order_items_dataset.csv
+
+**Checked :** Counted distinct seller_id per order_id.
+
+**Found :** 1,278 of 98,666 orders with items (1.3%) have items from more than one seller: 1,219 have 2 sellers, 54 have 3, 3 have 4 and 2 have 5. The most in one order is 5.
+
+**Means :** Seller belongs to the item row, not to the order — an order has no single seller. Counting orders per seller and adding them up gives more than the number of orders, because a multi-seller order counts once for each of its sellers.
+
+**Action :** Keep seller_id on the item-level table in Silver; do not add a seller column to the order table. Any per-seller order figure must group by (order_id, seller_id).
+
 ## 3.Open Questions
+
+### Q1 - Do all 32,951 product_ids in items exist in the products table?
+To answer when products is profiled.
+
+### Q2 - Why do 6 'unavailable' orders have items?
+609 orders have status 'unavailable'; 603 of them have no items (F15).
+
+### Q3 - Is zero freight real (free shipping) or missing?
+383 rows in 339 orders (0.34% of rows) have freight_value 0.00, and they come from only 9 of 3,095 sellers. That concentration points to a seller-level practice such as free shipping rather than random gaps, but the items table alone can't confirm it.
+
+### Q4 - Why do some shipping_limit_date values fall after the dataset ends?
+The max is 2020-04-09; the latest date in the orders table is 2018-11-12. Rows not yet counted or explained — check in Silver before any on-time dispatch metric uses this column.
