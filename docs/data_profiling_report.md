@@ -4,16 +4,18 @@ Source: [Kaggle, olistbr/brazilian-ecommerce](https://www.kaggle.com/datasets/ol
 
 Profiled by: Abhishek Patra
 
-Last updated: 2026-09-29
+Last updated: 2026-10-02
 
 ## 1.Inventory
 
 | File | Rows | Cols | Null Cols | Primary Key | PK Valid? |
 |------|------|------|-----------|-------------|-----------|
-| olist_sellers_dataset.csv | 3095 | 4 | 0 | seller_id | Yes - 3095 Distinct and not null values |
+| olist_sellers_dataset.csv | 3095 | 4 | 0 | seller_id | Yes - 3095 distinct, no nulls |
 | olist_customers_dataset.csv | 99441 | 5 | 0 | customer_id | Yes — 99,441 distinct, but order-scoped (see F5) |
 | olist_orders_dataset.csv | 99441 | 8 | 3 | order_id | Yes — 99,441 distinct |
 | olist_order_items_dataset.csv | 112650 | 7 | 0 | order_id,order_item_id | Yes — 112,650 distinct pairs, no nulls |
+| olist_products_dataset.csv | 32951 | 9 | 8 | product_id | Yes - 32,951 distinct, no nulls |
+| product_category_name_translation.csv | 71 | 2 | 0 | product_category_name | Yes — 71 distinct, no nulls |
 
 
 ### Column cardinality — sellers
@@ -50,11 +52,30 @@ Last updated: 2026-09-29
 |--------|----------|------|
 | order_id | 98666 | repeats — up to 21 rows per order; 775 orders have no items (see F15) |
 | order_item_id | 21 | position within an order; numbered 1, 2, 3… up to the order's row count, no gaps; max 21 (see F14) |
-| product_id | 32951 | not yet checked against the products table (see Q1) |
+| product_id | 32951 | same 32,951 products as the products table, both directions (see F19) |
 | seller_id | 3095 | same 3,095 sellers as the sellers table, both directions (see F17) |
 | shipping_limit_date | 93318 | max 2020-04-09, later than every date in the orders table — not investigated yet (see Q4) |
 | price | 5968 | min 0.85, max 6,735.00 — no zero or negative prices |
 | freight_value | 6999 | min 0.00 — 383 rows in 339 orders have zero freight (see Q3) |
+
+### Column cardinality — products
+| Column | Distinct | Note |
+|--------|----------|------|
+| product_id | 32951 | = row count; same 32,951 products as the items table (see F19) | 
+| product_category_name | 73 | 73 categories; 610 products have none (see F20); 2 have no English name (see F24) |
+| product_name_lenght | 66 | 5 to 76 characters; 610 empty (see F20, F23) |
+| product_description_lenght | 2960 | 4 to 3,992 characters; 610 empty (see F20, F23) |
+| product_photos_qty | 19 | 1 to 20 photos; 610 empty (see F20, F23) |
+| product_weight_g | 2204 | 0 to 40,425 g; 2 empty (see F21); 4 are 0 g (see F22) |
+| product_length_cm | 99 | 7 to 105 cm; 2 empty (see F21) |
+| product_height_cm | 102 | 2 to 105 cm; 2 empty (see F21) |
+| product_width_cm | 95 | 6 to 118 cm; 2 empty (see F21) |
+
+### Column cardinality — name translation
+| Column | Distinct | Note |
+|--------|----------|------|
+| product_category_name | 71 | = row count; one row per category (the key); covers 71 of the 73 product categories (see F24) |
+| product_category_name_english | 71 | = row count; every category has its own English name |
 
 ## 2.Findings
 
@@ -282,10 +303,83 @@ carrier and customer timestamps missing), giving 29 distinct.
 
 **Action :** Keep seller_id on the item-level table in Silver; do not add a seller column to the order table. Any per-seller order figure must group by (order_id, seller_id).
 
+### F19 - order_items links cleanly to products, in both directions
+
+**Table :** olist_order_items_dataset.csv, olist_products_dataset.csv
+
+**Checked :** Compared the set of product_id in items against products, in both directions.
+
+**Found :** 32,951 distinct product_id in items and 32,951 in products. 0 are in items but not in products, and 0 are in products but not in items.
+
+**Means :** Every item links to a known product, and every product in the products table appears in at least one order item.
+
+**Action :** Add a DQ test in Silver: every order_items.product_id must exist in products. It is 0 today, so any failure later means new bad data — route those rows to quarantine rather than dropping them.
+
+### F20 - 610 products are missing their whole description, not just single fields
+
+**Table :** olist_products_dataset.csv
+
+**Checked :** Filtered products where product_category_name is null, then counted nulls in every other column for just those rows.
+
+**Found :** 610 of 32,951 products (1.9%) have a null product_category_name. All 610 also have null product_name_lenght, product_description_lenght and product_photos_qty, so these four columns are empty together, on the same products. Inside these 610, weight, length, height and width have 1 null each (2 each in the whole table). These 610 products appear in 1,603 item rows (1.4% of all item rows) across 1,451 orders (1.5% of orders with items).
+
+**Means :** For these 610 products the whole description is missing. It is one block of missing information, not four separate problems. The products are real: every one of them appears in at least one order item (F19). A category report will either leave out their sales or show them under a blank category, and any average of photos or text length will quietly skip them.
+
+**Action :** Keep all 610 products and never drop them, because they appear in real orders. In Silver, label their category as 'unknown' so category reports show them as their own line instead of losing them. Leave name length, description length and photos empty; do not fill them with 0 or an average, because that would invent values. Add a DQ check that counts products with no category, with 610 as today's baseline, so the pipeline flags it if the number grows.
+
+### F21 - 2 products have no weight or size
+
+**Table :** olist_products_dataset.csv
+
+**Checked :** Picked the products with an empty weight, then checked which of their other columns were also empty.
+
+**Found :** 2 of 32,951 products have no weight. Both also have no length, height or width. One of them (09ff539a…, category 'bebes') still has its category, name length, description length and photos. The other (5eb56465…) has nothing filled in except its product_id. It is also one of the 610 products in F20.
+
+**Means :** For these 2 products, weight and all three size measurements are missing together. The second product has no information at all apart from its id. Both are real products that show up in orders (F19), but we cannot use them in anything that needs weight or size.
+
+**Action :** Keep both products and do not delete them. Leave their weight and size empty; do not fill in 0 or an average, because that would be a made-up number. When calculating anything with weight or size, skip these 2 products instead of counting them as 0. Add a DQ check that counts products with no weight; today the count is 2, so the check should warn if it goes up.
+
+### F22 - 4 products have a weight of 0 g
+
+**Table :** olist_products_dataset.csv
+
+**Checked :** Filtered products where product_weight_g is 0 and looked at all their columns.
+
+**Found :** 4 of 32,951 products have product_weight_g = 0. All 4 are in the category cama_mesa_banho, all measure 30 × 25 × 30 cm (length × height × width), each has 1 photo, and their description lengths are 528 to 529 characters.
+
+**Means :** A real product cannot weigh 0 g, so these 0s are not real weights; they behave like missing values written as a number. That makes them worse than an empty cell, because 0 looks real: it pulls down any average weight and breaks any calculation that divides by weight. The 4 look like versions of the same listing — same category, same size and almost the same description length.
+
+**Action :** In Silver, treat a weight of 0 as missing: store it as empty, not 0, so these 4 products are handled the same way as the 2 in F21. Add a DQ test that product_weight_g must be above 0 whenever it is filled in; 4 products fail it today.
+
+### F23 - Two column names are spelled wrong, and three counts are stored as decimals
+
+**Table :** olist_products_dataset.csv
+
+**Checked :** Looked at the column names and data types with info(), and at the values in the first few rows.
+
+**Found :** Two column names say "lenght" instead of "length": product_name_lenght and product_description_lenght. These two columns and product_photos_qty are stored as decimals (float64), so whole numbers show up as 40.0, 287.0 and 1.0. All three have 610 empty values (F20).
+
+**Means :** The spelling mistake is in the source file itself, not in our code, and it is easy to type "length" by habit and get an error. The decimals happen because pandas cannot keep empty values in a whole-number column, so when even one value is empty it turns the whole column into decimals. These columns count things (characters and photos), so they can only be whole numbers; the .0 comes from the way the file was read, not from the data. It is the same kind of problem as F3: the data is fine, and the way we read it needs fixing.
+
+**Action :** In Bronze, keep the column names exactly as they are in the source file, so we can always trace back to the original. In Silver, rename them to product_name_length and product_description_length. When reading the three count columns, use a whole-number type that allows empty values (Int64 in pandas, INTEGER in the database), so the numbers stay whole and the 610 empty values stay empty.
+
+### F24 - 2 product categories have no English name
+
+**Table :** olist_products_dataset.csv, product_category_name_translation.csv
+
+**Checked :** Compared the categories in products (empty ones left out) with the categories in the translation table, in both directions, then counted the products and order items in the categories that did not match.
+
+**Found :** 71 of the 73 categories in products have an English name. 2 do not: portateis_cozinha_e_preparadores_de_alimentos (10 products) and pc_gamer (3 products). These 13 products appear in 24 item rows across 22 orders. In the other direction, every category in the translation table is used by at least one product.
+
+
+**Means :** The translation table is almost complete, but not quite. If products are joined to translation with an inner join, these 13 products and their sales silently disappear from any report that uses English names. With a left join they stay, but their English name is empty.
+
+**Action :** In Silver, join products to translation with a left join so no product is lost. Where there is no English name, use the Portuguese name instead. Products with no category at all are labelled 'unknown' (F20). Add a DQ test that every non-empty category in products has a translation; 2 fail today.
+
 ## 3.Open Questions
 
 ### Q1 - Do all 32,951 product_ids in items exist in the products table?
-To answer when products is profiled.
+**Answered (F19):** yes — all 32,951 match, in both directions.
 
 ### Q2 - Why do 6 'unavailable' orders have items?
 609 orders have status 'unavailable'; 603 of them have no items (F15).
