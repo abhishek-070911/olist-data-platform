@@ -4,7 +4,7 @@ Source: [Kaggle, olistbr/brazilian-ecommerce](https://www.kaggle.com/datasets/ol
 
 Profiled by: Abhishek Patra
 
-Last updated: 2026-10-02
+Last updated: 2026-10-05
 
 ## 1.Inventory
 
@@ -16,6 +16,7 @@ Last updated: 2026-10-02
 | olist_order_items_dataset.csv | 112650 | 7 | 0 | order_id,order_item_id | Yes — 112,650 distinct pairs, no nulls |
 | olist_products_dataset.csv | 32951 | 9 | 8 | product_id | Yes - 32,951 distinct, no nulls |
 | product_category_name_translation.csv | 71 | 2 | 0 | product_category_name | Yes — 71 distinct, no nulls |
+| olist_order_payments_dataset.csv | 103886 | 5 | 0 | order_id,payment_sequential | Yes - 103,886 distinct pairs, no nulls |
 
 
 ### Column cardinality — sellers
@@ -76,6 +77,15 @@ Last updated: 2026-10-02
 |--------|----------|------|
 | product_category_name | 71 | = row count; one row per category (the key); covers 71 of the 73 product categories (see F24) |
 | product_category_name_english | 71 | = row count; every category has its own English name |
+
+### Column cardinality — payments
+| Column | Distinct | Note |
+|--------|----------|------|
+| order_id | 99440 | repeats — up to 29 rows per order; 1 order in orders has no payment (see F25) |
+| payment_sequential | 29 | 1 to 29; in 80 orders the numbering starts at 2 instead of 1 (see F27) |
+| payment_type | 5 | credit_card 76,795; boleto 19,784; voucher 5,775; debit_card 1,529; not_defined 3 |
+| payment_installments | 24 | 0 to 24, every value except 19; 2 rows have 0, both in delivered orders (see F29) |
+| payment_value | 29077 | 0.00 to 13,664.08; 9 rows are 0.00 (see F26) |
 
 ## 2.Findings
 
@@ -371,10 +381,82 @@ carrier and customer timestamps missing), giving 29 distinct.
 
 **Found :** 71 of the 73 categories in products have an English name. 2 do not: portateis_cozinha_e_preparadores_de_alimentos (10 products) and pc_gamer (3 products). These 13 products appear in 24 item rows across 22 orders. In the other direction, every category in the translation table is used by at least one product.
 
-
 **Means :** The translation table is almost complete, but not quite. If products are joined to translation with an inner join, these 13 products and their sales silently disappear from any report that uses English names. With a left join they stay, but their English name is empty.
 
 **Action :** In Silver, join products to translation with a left join so no product is lost. Where there is no English name, use the Portuguese name instead. Products with no category at all are labelled 'unknown' (F20). Add a DQ test that every non-empty category in products has a translation; 2 fail today.
+
+### F25 - 1 delivered order has no payment record
+
+**Table :** olist_orders_dataset.csv, olist_order_payments_dataset.csv, olist_order_items_dataset.csv
+
+**Checked :** Compared the order_ids in orders and payments, both ways, looked at the one order that did not match, then looked it up in the items table.
+
+**Found :** 1 order 'bfbd0f9bdef84302105ad712db648a6c' is in orders but has no payment. It was delivered: bought on 15 Sep 2016, approved in the same second, given to the carrier on 7 Nov 2016 and delivered on 9 Nov 2016. Every order in payments is also in orders. It has 3 rows in the items table: 3 units of the same product from one seller (see F16), each 44.99 plus 2.83 freight, 143.46 in total.
+
+**Means :** Every order has a payment except this one. A delivered order should have been paid for, so its payment record was either lost or never saved. It comes from September 2016, the same early period as F12 and F15. Any revenue number worked out from payments will miss this order.
+
+**Action :** Keep this order and do not delete it. Add a DQ check that every delivered order has at least one payment; today 1 order fails. When calculating revenue, write down which table it comes from (payments or items), because the two may give different answers for orders like this one.
+
+### F26 - 9 payments are worth 0: 3 "not_defined" payments on cancelled orders and 6 vouchers worth nothing
+
+**Table :** olist_order_payments_dataset.csv, olist_orders_dataset.csv
+
+**Checked :** Picked the payment rows with a value of 0, then looked up the status of their orders in the orders table.
+
+**Found :** 9 payment rows, in 8 orders, have a value of 0.00. 3 of them have the payment type not_defined. All 3 belong to orders that were cancelled before they were ever approved (00b1cb03…, 4637ca19…, c8c52818…, bought in August and September 2018). The other 6 are vouchers in 5 orders: 4 delivered and 1 shipped. Their sequence numbers are 3, 4, 13 and 14, so each of these orders also has other payments; the zero voucher is just one of several payments in the order.
+
+**Means :** These are two different cases. The not_defined rows belong to orders that were cancelled before any payment was approved, so the 0 is correct: no money was paid. The zero vouchers sit inside orders that were paid in other ways. They do not change the order total, so sums stay right, but they make the number of payments look bigger and pull down the average payment value.
+
+**Action :** Keep all 9 rows. Keep not_defined as its own payment type; do not mix it into another type. When counting payments or working out the average payment value, leave out the rows with a value of 0. Add DQ checks that payment_type is always one of the 5 known types and that payment_value is never below 0. Today there are 9 zero rows and 3 not_defined rows, so the checks should warn if these numbers go up.
+
+### F27 - 80 orders have payment numbers that start at 2 instead of 1
+
+**Table :** olist_order_payments_dataset.csv, olist_order_items_dataset.csv
+
+**Checked :** Checked whether payment_sequential runs 1, 2, 3 and so on without gaps in every order, then grouped the flagged orders by their (min, max, count) pattern. For the flagged orders, compared each order's payment total with its item total (see F30) and counted their payment types.
+
+**Found :** 80 orders have payment numbers that start at 2 instead of 1: 78 have a single payment numbered 2, and 2 have payments numbered 2 and 3. No order skips a number in the middle. In 79 of them the payments add up to the items: 77 exactly and 2 within 1 cent. The other one has no items at all (see F28). Their 82 payment rows are mostly debit card (52), then credit card (29) and boleto (1). The 2 zero-installment payments in F29 are in these orders.
+
+**Means :** No money is missing: in these orders the payments that are there already add up to the items. So either there never was a payment number 1, or it was worth nothing; either way the totals are right. Debit card makes up 52 of these 82 payment rows but only 1.5% of all payment rows, so the numbering seems tied to how some debit card payments were recorded. Anything that looks for payment number 1 to find an order's first or main payment will find nothing for these 80 orders.
+
+**Action :** Keep the rows and their numbers as they are; do not renumber them. To find an order's first payment, use the lowest payment_sequential in the order, not payment_sequential = 1. Add a DQ check that counts orders whose numbering does not start at 1; today it is 80, so it should warn if this goes up.
+
+
+### F28 - 775 orders with no items still have payments worth 162,591.95
+
+**Table :** olist_order_payments_dataset.csv, olist_order_items_dataset.csv, olist_orders_dataset.csv
+
+**Checked :** Compared the order_ids in items and payments, both ways. Checked that the orders with payments but no items are the same orders as in F15, then added up their payments by order status.
+
+**Found :** 1 order has items but no payment (bfbd0f9b…, see F25). 775 orders have payments but no items. They are exactly the 775 orders with no items in F15, so every order without items still has a payment record. Together they have 830 payment rows worth 162,591.95: unavailable 603 orders (124,339.02), canceled 164 (37,337.87), created 5 (688.10), invoiced 2 (149.23) and shipped 1 (77.73).
+
+**Means :** The payments table holds money for orders that have nothing in them. Almost all of it is on unavailable and cancelled orders, and nothing in the payments table says whether it was refunded. So a payment row does not prove a sale. A revenue total that adds up all of payment_value would include these 162,591.95 (about 1% of all payment value); a total built from items would not. This is the other side of F25, where an order has items but no payment.
+
+**Action :** Keep all 830 payment rows; do not delete them. In Silver, give every order two flags: has_items and has_payment. Count revenue only for orders where has_items is true, and show the money on orders without items as its own number, split by status. Add a DQ check that counts orders with payments but no items; today it is 775 orders and 162,591.95, so it should warn if either goes up.
+
+### F29 - 2 credit card payments have 0 installments
+
+**Table :** olist_order_payments_dataset.csv, olist_orders_dataset.csv
+
+**Checked :** Listed the distinct values of payment_installments, then looked at the rows with 0 and the status of their orders.
+
+**Found :** payment_installments has every value from 0 to 24 except 19. 2 rows have 0 installments, one in each of 2 delivered orders (744bade1…, 1a571083…, bought in April and May 2018). Both are credit card payments, numbered 2 in their order, worth 58.69 and 129.94. Both orders are also among the 80 orders in F27 whose payment numbers start at 2.
+
+**Means :** Every other payment row has at least 1 installment, and a payment can't be split into 0 parts, so these 2 zeros are recording errors. The payments themselves look real: they have a value and both orders were delivered. Anything that divides by the number of installments, such as the amount of each installment, would divide by 0 for these 2 rows.
+
+**Action :** Keep both rows. Bronze keeps the 0 as it is. In Silver, store it as null (unknown) and flag the row, so calculations skip it instead of breaking. Add a DQ check that payment_installments is at least 1; today 2 rows fail, so it should warn if this goes up.
+
+### F30 - Payments match price + freight for 99.4% of orders
+
+**Table :** olist_order_payments_dataset.csv, olist_order_items_dataset.csv
+
+**Checked :** Added up each order's payment_value, and each order's price + freight_value, joined the two totals on order_id (keeping orders found in only one table), and compared them to the cent.
+
+**Found :** 98,665 orders are in both tables; 776 are in only one (775 with payments but no items, see F28; 1 with items but no payment, see F25). Of the 98,665: 98,089 (99.4%) match exactly, 273 are off by 1 cent, 264 have payments larger than their items (by 0.02 to 182.81, median about 6.5), and 39 have payments smaller than their items (by 0.02 to 51.62, median 0.04).
+
+**Means :** For almost every order, what the customer paid equals the price plus freight, so the two tables agree. A 1-cent difference is rounding, not missing money. The 303 orders that differ by more than 1 cent are real gaps that this check can't explain yet (see Q5). Because the two tables agree this closely, items can be the source for sales revenue, with payments kept as the amount actually paid.
+
+**Action :** Build sales revenue from items (price + freight_value) and write this down as the project's revenue definition; this settles the choice F25 asked for. Keep each order's payment total next to it as the amount paid, and store the difference. Treat a difference of 1 cent or less as a match. Add a DQ check on the difference: today 303 orders differ by more than 1 cent (264 more, 39 less), so it should warn if this goes up.
 
 ## 3.Open Questions
 
@@ -389,3 +471,6 @@ carrier and customer timestamps missing), giving 29 distinct.
 
 ### Q4 - Why do some shipping_limit_date values fall after the dataset ends?
 The max is 2020-04-09; the latest date in the orders table is 2018-11-12. Rows not yet counted or explained — check in Silver before any on-time dispatch metric uses this column.
+
+### Q5 - Why do 303 orders have payments that differ from their items by more than 1 cent?
+264 orders have payments larger than price + freight (by up to 182.81) and 39 have smaller (by up to 51.62) (see F30). The totals alone don't say why. Next: look at the payment types and installments of these orders.
