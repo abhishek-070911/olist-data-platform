@@ -4,7 +4,7 @@ Source: [Kaggle, olistbr/brazilian-ecommerce](https://www.kaggle.com/datasets/ol
 
 Profiled by: Abhishek Patra
 
-Last updated: 2026-10-05
+Last updated: 2026-10-07
 
 ## 1.Inventory
 
@@ -17,6 +17,7 @@ Last updated: 2026-10-05
 | olist_products_dataset.csv | 32951 | 9 | 8 | product_id | Yes - 32,951 distinct, no nulls |
 | product_category_name_translation.csv | 71 | 2 | 0 | product_category_name | Yes — 71 distinct, no nulls |
 | olist_order_payments_dataset.csv | 103886 | 5 | 0 | order_id,payment_sequential | Yes - 103,886 distinct pairs, no nulls |
+| olist_order_reviews_dataset.csv | 99224 | 7 | 2 | review_id,order_id | Yes — 99,224 distinct pairs, no nulls |
 
 
 ### Column cardinality — sellers
@@ -86,6 +87,17 @@ Last updated: 2026-10-05
 | payment_type | 5 | credit_card 76,795; boleto 19,784; voucher 5,775; debit_card 1,529; not_defined 3 |
 | payment_installments | 24 | 0 to 24, every value except 19; 2 rows have 0, both in delivered orders (see F29) |
 | payment_value | 29077 | 0.00 to 13,664.08; 9 rows are 0.00 (see F26) |
+
+### Column cardinality — reviews
+| Column | Distinct | Note |
+|--------|----------|------|
+| review_id | 98410 | repeats — 789 review_ids appear on 2 or 3 orders; copies are identical apart from order_id (see F31) |
+| order_id | 98673 | repeats — 547 orders have 2 or 3 reviews (see F32); 768 orders have no review (see F33) |
+| review_score | 5 | 1 to 5; 57.8% are 5 and 11.5% are 1 (see F39) |
+| review_comment_title | 4527 | empty in 87,656 rows (88%) (see F34) |
+| review_comment_message | 36159 | empty in 58,247 rows (59%) (see F34) |
+| review_creation_date | 636 | date only, 2 Oct 2016 to 31 Aug 2018; 85 rows have a time part (see F35) |
+| review_answer_timestamp | 98248 | 7 Oct 2016 to 29 Oct 2018; never before the creation date (see F36) |
 
 ## 2.Findings
 
@@ -458,6 +470,114 @@ carrier and customer timestamps missing), giving 29 distinct.
 
 **Action :** Build sales revenue from items (price + freight_value) and write this down as the project's revenue definition; this settles the choice F25 asked for. Keep each order's payment total next to it as the amount paid, and store the difference. Treat a difference of 1 cent or less as a match. Add a DQ check on the difference: today 303 orders differ by more than 1 cent (264 more, 39 less), so it should warn if this goes up.
 
+### F31 - The same review is copied onto 2 or 3 orders
+
+**Table :** olist_order_reviews_dataset.csv
+
+**Checked :** Counted how often each review_id appears. For the review_ids that repeat, counted how many different values every other column has across the copies.
+
+**Found :** 99,224 rows but only 98,410 distinct review_ids. 789 review_ids appear more than once: 764 twice and 25 three times, which accounts for all 814 extra rows. In all 789, the copies have the same score, title, message, creation date and answer time; only order_id differs. No (review_id, order_id) pair repeats.
+
+**Means :** One review was attached to several orders, so review_id alone is not a key: one row is one review for one order. Counting rows gives 814 more reviews than were actually written; counting distinct review_ids gives the real number.
+
+**Action :** Use (review_id, order_id) as the key. Count distinct review_id when counting reviews or averaging scores per review; use the pair when attaching a score to an order. Add DQ checks that the pair stays unique and that copies of a review_id never disagree; today 789 review_ids repeat and all copies match.
+
+### F32 - 547 orders have more than one review, and 202 of them disagree on the score
+
+**Table :** olist_order_reviews_dataset.csv
+
+**Checked :** Counted reviews per order. For orders with more than one review, counted how many different values each column has, and for orders whose scores differ, measured the gap between the lowest and highest score.
+
+**Found :** 98,126 orders have 1 review, 543 have 2 and 4 have 3 (547 orders, 1,098 rows). Within those 547 orders, the answer time differs in all 547, the creation date in 392, the message in 230, the score in 202 and the title in 13. In the 202 orders with different scores, the gap is 1 point in 90, 2 in 47, 3 in 32 and 4 in 33.
+
+**Means :** These are separate reviews, not copies (unlike F31). An order has no single score: 202 orders (37% of multi-review orders) have conflicting scores, and 65 of them are 3 or 4 points apart, such as 1 and 5. Because the answer times always differ, the latest review can be picked.
+
+**Action :** Keep every review row in Silver. For order-level metrics in Gold, use one review per order: the one with the latest review_answer_timestamp, and write this rule in the model's documentation. Add a DQ check that counts orders with more than one review; today it is 547, so it should warn if this goes up.
+
+### F33 - Every review links to an order, but 768 orders have no review
+
+**Table :** olist_order_reviews_dataset.csv, olist_orders_dataset.csv
+
+**Checked :** Compared the order_ids in reviews and orders, both ways, then looked at the status of the orders that have no review.
+
+**Found :** Every order_id in reviews exists in orders. 768 of 99,441 orders (0.8%) have no review: delivered 646, shipped 75, canceled 20, unavailable 14, processing 6, invoiced 5, created 2.
+
+**Means :** Reviews link cleanly to orders. Most orders without a review were delivered, so a missing review means the customer didn't answer, not a broken link. These orders have no score at all; they are not unhappy customers.
+
+**Action :** Join from orders to reviews with a left join so the 768 orders stay visible with an empty score; never fill it with 0. Calculate review rates and average scores only over orders that have a review. Add a DQ check that every review's order_id exists in orders; today 0 fail.
+
+### F34 - Most reviews have a score but no written comment
+
+**Table :** olist_order_reviews_dataset.csv
+
+**Checked :** Counted reviews by which comment columns are filled: title only, message only, both, or neither.
+
+**Found :** review_comment_title is empty in 87,656 rows (88%) and review_comment_message in 58,247 (59%). 56,518 reviews (57%) have neither, 31,138 have only a message, 1,729 only a title and 9,839 both. Every review has a score.
+
+**Means :** Comments are optional: a review is a score first, and text is extra. An empty title or message means nothing was written, not that data was lost. Only 43% of reviews (42,706) have any text, so any analysis of comments covers less than half of the reviews.
+
+**Action :** Keep empty comments as nulls; do not fill them with blank text. In Silver, add a flag has_comment (true if the title or message is filled). Do not drop reviews without text from score metrics.
+
+### F35 - review_creation_date is a date, except for 85 rows
+
+**Table :** olist_order_reviews_dataset.csv
+
+**Checked :** Compared every review_creation_date with its normalised (midnight) version and counted the rows that change.
+
+**Found :** 99,139 creation dates are at midnight and 85 are not. The column has 636 distinct days, from 2 Oct 2016 to 31 Aug 2018.
+
+**Means :** The column holds a date, not a time; the 85 rows are the exception, and their cause is not yet known (see Q6). Any comparison with a full timestamp, such as the purchase or delivery time, has to compare dates only, or same-day events look out of order.
+
+**Action :** In Silver, store review_creation_date as a date and compare it with other timestamps on the date only. Add a DQ check that counts creation dates with a time part; today it is 85.
+
+### F36 - Reviews are answered after they are created, mostly within 3 days
+
+**Table :** olist_order_reviews_dataset.csv
+
+**Checked :** Subtracted review_creation_date from review_answer_timestamp and looked at the gap in days.
+
+**Found :** No answer comes before its review was created; the smallest gap is 0 days. Half of the reviews are answered by the next day and three-quarters within 3 days. 658 reviews (0.7%) were answered more than 30 days later, the longest after 518 days.
+
+**Means :** The two columns are in the right order in every row. Most customers answer quickly, but a small group answers weeks or months later, so a review's creation date and answer date can fall in very different months.
+
+**Action :** Add a DQ check that review_answer_timestamp is never before review_creation_date; today 0 fail. When reporting scores by month, choose either the creation date or the answer date and write the choice down.
+
+### F37 - 64 reviews were created before their order was bought
+
+**Table :** olist_order_reviews_dataset.csv, olist_orders_dataset.csv
+
+**Checked :** Compared each review's creation date with its order's purchase date (dates only), then looked at the status of those orders and how many days early the reviews were.
+
+**Found :** 64 reviews were created before their order was bought: 57 on canceled orders, 6 on delivered and 1 on shipped. They are 1 to 111 days early; the median is 15.5 days.
+
+**Means :** A review can't be written before the purchase, so one of the two dates is wrong for these orders, and the data does not show which one. Almost all are cancelled orders, so it mostly touches orders that never completed.
+
+**Action :** Keep these rows and flag them in Silver (review_before_purchase). Leave them out of any "time from purchase to review" metric. Add a DQ check that review_creation_date is not before the purchase date; today 64 fail, so it should warn if this goes up.
+
+### F38 - 8% of reviews were written before the order arrived
+
+**Table :** olist_order_reviews_dataset.csv, olist_orders_dataset.csv
+
+**Checked :** Compared each review's creation date with its order's delivery date (dates only), counted reviews whose order has no delivery date, and for both groups measured the days between the estimated delivery date and the review's creation date.
+
+**Found :** 5,127 reviews were created before the order was delivered (delivered 5,126, canceled 1). Another 2,865 belong to orders with no delivery date: shipped 1,043, canceled 603, unavailable 597, invoiced 313, processing 296, delivered 8 (see F11), created 3, approved 2. Of these 7,992 early reviews, 5,248 (66%) were created exactly 2 days after the estimated delivery date; the next most common gaps are 3 days (962), 4 (352) and 1 (314).
+
+**Means :** The review survey is not sent only after delivery. When an order is late or never arrives, the review appears about 2 days after the estimated delivery date. So 8% of reviews (7,992 of 99,224) were written before the customer had the goods; those scores rate the delay, not the product.
+
+**Action :** In Silver, add a flag reviewed_before_delivery (true for these 7,992). Report scores from reviews written after delivery separately from those written before it. Compare review dates with delivery dates on the date only, and treat an empty delivery date as "not delivered".
+
+### F39 - Scores lean heavily towards 5, and undelivered orders score far lower
+
+**Table :** olist_order_reviews_dataset.csv, olist_orders_dataset.csv
+
+**Checked :** Counted reviews per score, then the number of reviews and the average score for each order status.
+
+**Found :** Score 5: 57.8%, 4: 19.3%, 3: 8.2%, 2: 3.2%, 1: 11.5%. Every score is between 1 and 5. Delivered orders (96,361 reviews) average 4.16. All other statuses together have 2,863 reviews, averaging between 1.28 and 2.50: shipped 2.01 (1,043), canceled 1.81 (609), unavailable 1.53 (597), invoiced 1.66 (313), processing 1.28 (296), created 2.33 (3), approved 2.50 (2). These counts are review rows, so the 814 copied rows from F31 are included.
+
+**Means :** Scores are not spread evenly: most customers give 5, and unhappy customers give 1 far more often than 2. Reviews on orders that never arrived rate the failed delivery, not the product, and they pull any overall average down. An average on its own hides this shape.
+
+**Action :** Calculate product and seller scores from delivered orders only, and report scores for undelivered orders as their own number. Show the share of 4–5 and 1–2 scores next to the average. Add a DQ check that review_score is always between 1 and 5; today all rows pass.
+
 ## 3.Open Questions
 
 ### Q1 - Do all 32,951 product_ids in items exist in the products table?
@@ -474,3 +594,6 @@ The max is 2020-04-09; the latest date in the orders table is 2018-11-12. Rows n
 
 ### Q5 - Why do 303 orders have payments that differ from their items by more than 1 cent?
 264 orders have payments larger than price + freight (by up to 182.81) and 39 have smaller (by up to 51.62) (see F30). The totals alone don't say why. Next: look at the payment types and installments of these orders.
+
+### Q6 - Why do 85 review creation dates have a time part?
+All other 99,139 creation dates are at midnight (see F35). Next: look at the times and dates of those 85 rows, and compare the dates with when Brazil's clocks moved forward for daylight saving in 2016 and 2017.
