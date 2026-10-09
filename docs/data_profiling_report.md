@@ -4,26 +4,29 @@ Source: [Kaggle, olistbr/brazilian-ecommerce](https://www.kaggle.com/datasets/ol
 
 Profiled by: Abhishek Patra
 
-Last updated: 2026-10-07
+Notebook: [notebooks/01_profiling.ipynb](../notebooks/01_profiling.ipynb)
 
-## 1.Inventory
+Last updated: 2026-10-09
+
+## 1. Inventory
 
 | File | Rows | Cols | Null Cols | Primary Key | PK Valid? |
 |------|------|------|-----------|-------------|-----------|
-| olist_sellers_dataset.csv | 3095 | 4 | 0 | seller_id | Yes - 3095 distinct, no nulls |
+| olist_sellers_dataset.csv | 3095 | 4 | 0 | seller_id | Yes — 3,095 distinct, no nulls |
 | olist_customers_dataset.csv | 99441 | 5 | 0 | customer_id | Yes — 99,441 distinct, but order-scoped (see F5) |
 | olist_orders_dataset.csv | 99441 | 8 | 3 | order_id | Yes — 99,441 distinct |
 | olist_order_items_dataset.csv | 112650 | 7 | 0 | order_id,order_item_id | Yes — 112,650 distinct pairs, no nulls |
-| olist_products_dataset.csv | 32951 | 9 | 8 | product_id | Yes - 32,951 distinct, no nulls |
+| olist_products_dataset.csv | 32951 | 9 | 8 | product_id | Yes — 32,951 distinct, no nulls |
 | product_category_name_translation.csv | 71 | 2 | 0 | product_category_name | Yes — 71 distinct, no nulls |
-| olist_order_payments_dataset.csv | 103886 | 5 | 0 | order_id,payment_sequential | Yes - 103,886 distinct pairs, no nulls |
+| olist_order_payments_dataset.csv | 103886 | 5 | 0 | order_id,payment_sequential | Yes — 103,886 distinct pairs, no nulls |
 | olist_order_reviews_dataset.csv | 99224 | 7 | 2 | review_id,order_id | Yes — 99,224 distinct pairs, no nulls |
+| olist_geolocation_dataset.csv | 1000163 | 5 | 0 | none | No — no column is unique, and 261,831 rows are exact copies of another row (see F40)  |
 
 
 ### Column cardinality — sellers
 | Column | Distinct | Note |
 |--------|----------|------|
-| seller_id | 3095 | = Row count |
+| seller_id | 3095 | = row count |
 | seller_zip_code_prefix | 2246 | not unique per seller |
 | seller_city | 611 | includes variant spellings (see F4) |
 | seller_state | 23 | distinct codes present; includes DF (Federal District) | 
@@ -31,10 +34,10 @@ Last updated: 2026-10-07
 ### Column cardinality — customers
 | Column | Distinct | Note |
 |--------|----------|------|
-| customer_id | 99441 | = Row count(See F5) |
+| customer_id | 99441 | = row count (see F5) |
 | customer_unique_id | 96096 | 96,096 distinct across 99,441 rows — repeats (see F6) |
 | customer_zip_code_prefix | 14994 | not unique per customer |
-| customer_city | 4119 | not checked for variant spellings (see F4) |
+| customer_city | 4119 | not checked for variant spellings (see F4, F42) |
 | customer_state | 27 | more codes than seller_state (23) |
 
 ### Column cardinality — orders
@@ -43,11 +46,11 @@ Last updated: 2026-10-07
 | order_id | 99441 | Unique order id |
 | customer_id | 99441 | Same number of rows as of customers table |
 | order_status | 8 | approved,canceled,created,delivered,invoiced,processing,shipped,unavailable |
-| order_purchase_timestamp | 98875 | 566 rows share timestamp with another order |
+| order_purchase_timestamp | 98875 | 566 fewer distinct times than orders, so some orders share a purchase time |
 | order_approved_at | 90733 | 160 Null rows |
 | order_delivered_carrier_date | 81018 | 1783 Null rows |
 | order_delivered_customer_date | 95664 | 2965 Null rows |
-| order_estimated_delivery_date| 459 | Date only no time component like other 4 |
+| order_estimated_delivery_date| 459 | date only; no time part, unlike the other 4 date columns |
 
 ### Column cardinality — items
 | Column | Distinct | Note |
@@ -99,7 +102,30 @@ Last updated: 2026-10-07
 | review_creation_date | 636 | date only, 2 Oct 2016 to 31 Aug 2018; 85 rows have a time part (see F35) |
 | review_answer_timestamp | 98248 | 7 Oct 2016 to 29 Oct 2018; never before the creation date (see F36) |
 
-## 2.Findings
+### Column cardinality — geolocation
+| Column | Distinct | Note |
+|--------|----------|------|
+| geolocation_zip_code_prefix | 19015 | read as text so leading zeros stay (see F3); 1 to 1,146 rows per prefix, median 29 (see F40); 157 customer and 7 seller prefixes are missing (see F43) |
+| geolocation_lat | 717360 | -36.61 to 45.07; both ends are outside Brazil (see Q7) |
+| geolocation_lng | 717613 | -101.47 to 121.11; both ends are outside Brazil (see Q7) |
+| geolocation_city | 8011 | 5,968 once accents are removed; 8,556 prefixes have more than one city name (see F42) |
+| geolocation_state | 27 | same number of codes as customer_state; 8 prefixes have two states (see F41) |
+
+### Relationships between tables
+
+| Child → Parent | Key | Child rows with no parent | Parent rows with no child | See |
+|----------------|-----|---------------------------|---------------------------|-----|
+| orders → customers | customer_id | 0 | 0 | F8 |
+| order_items → orders | order_id | 0 | 775 orders have no items | F15, F17 |
+| order_items → sellers | seller_id | 0 | 0 | F17 |
+| order_items → products | product_id | 0 | 0 | F19 |
+| products → name translation | product_category_name | 2 categories (13 products); 610 products have no category | 0 | F20, F24 |
+| payments → orders | order_id | 0 | 1 order has no payment | F25 |
+| reviews → orders | order_id | 0 | 768 orders have no review | F33 |
+| customers → geolocation | zip prefix | 157 prefixes (278 orders) | 4,099 prefixes used by no customer or seller | F40, F43 |
+| sellers → geolocation | zip prefix | 7 prefixes (7 sellers) | same 4,099 | F40, F43 |
+
+## 2. Findings
 
 ### F1 - seller_zip_code_prefix is not unique per seller
 
@@ -109,33 +135,33 @@ Last updated: 2026-10-07
 
 **Found :** 2,246 distinct values across 3,095 sellers. The most common prefix covers 49 sellers.
 
-**Means :** Multiple sellers share same zip code,so it identifies 'location' and not a seller.
+**Means :** Multiple sellers share same zip code, so it identifies 'location' and not a seller.
 
-**Action :** Treat it as descriptive attribute,not as a key.
+**Action :** Treat it as descriptive attribute, not as a key.
 
-### F2 - Seller base is heavy at SP state
+### F2 - 60% of sellers are in SP, and 17 of 23 states have fewer than 50 sellers each
 
 **Table :** olist_sellers_dataset.csv.
 
 **Checked :** Counted sellers per state (value_counts on seller_state).
 
-**Found :** SP holds 1,849 of 3,095 sellers (60%); top 3 (SP, PR, MG) hold 2,442 (79%).
+**Found :** SP holds 1,849 of 3,095 sellers (60%); top 3 (SP, PR, MG) hold 2,442 (79%). 17 of the 23 state codes have fewer than 50 sellers each, and 5 of them (AC, AM, MA, PA, PI) have a single seller.
 
-**Means :** Large number of sellers are in SP compared to other states.
+**Means :** Sellers are spread very unevenly: SP alone has more sellers than all other states together (1,849 vs 1,246). In most states, a per-state seller figure rests on a handful of sellers, and in 5 states on just one, so it can swing a lot and describes that seller more than the state.
 
-**Action :** None for the model. Recorded as context: 20 state codes have fewer than 50 sellers each.
+**Action :** In Gold, show the number of sellers next to any per-state seller metric (such as average review score or delivery time), so figures from states with few sellers are not read as reliable.
 
-### F3 - Zip is parsed as int64,stripping leads zero
+### F3 - Zip prefix is a 5-character code with leading zeros, so it must be read as text
 
-**Table :** olist_sellers_dataset.csv.
+**Table :** olist_sellers_dataset.csv, olist_customers_dataset.csv.
 
-**Checked :** Counted rows where prefix is shorter than 5 characters.
+**Checked :** Read the zip prefix columns as text (dtype=str) and counted the values by length.
 
-**Found :** 1,027 rows (33%) hold 4-character values. Lengths are only 4 or 5, so every 4-character value is a 5-digit prefix whose leading zero was dropped on read. Customers was read with dtype=str from the start, so the equivalent count there is assumed, not measured.
+**Found :** All 3,095 seller prefixes and all 99,441 customer prefixes have 5 characters. Values that start with 0 keep it, such as 04195 (sellers) and 01151 (customers).
 
-**Means :** The source CSV is correct — it contains "04195". The zero was destroyed by pandas inferring int64 on read. This is a defect in our ingestion, not in the source data.
+**Means :** The zip prefix is a code, not a number: every value has exactly 5 characters, and the leading zero is part of it. Read without dtype=str, pandas would treat the column as numbers (int64), and a number cannot keep a leading zero, so 04195 would become 4195 and stop matching any table or zip list that keeps it as text. This is about how we read the file, not a problem in the source data.
 
-**Action :** Read zip prefix columns with dtype=str at ingestion, in sellers and customers. Add a DQ test asserting length == 5.
+**Action :** Read zip prefix columns with dtype=str at ingestion, in sellers, customers and geolocation. Add a DQ test asserting length == 5; today every seller and customer prefix passes.
 
 ### F4 - seller_city contains variant spellings of the same city
 
@@ -145,7 +171,7 @@ Last updated: 2026-10-07
 
 **Found :** 'sao jose do rio preto' (33) and 's jose do rio preto' (1) — the same city under two values.
 
-**Means :** Any group-by on raw city splits this city in two. Other abbreviations likely exist across the 611 values.
+**Means :** Any group-by on raw city splits this city in two. Other abbreviations likely exist across the 611 values. Geolocation has the same problem on a much larger scale (see F42).
 
 **Action :** Do not use raw city as a grouping key. Standardise in Silver against a municipality reference list. Extent of the problem across all 611 values not yet measured.
 
@@ -154,23 +180,23 @@ Last updated: 2026-10-07
 
 **Table :** olist_customers_dataset.csv.
 
-**Checked :** Compared distinct customer_id and customer_unique_id against total row.
+**Checked :** Compared distinct customer_id and customer_unique_id against the row count.
 
 **Found :** 99,441 distinct customer_id across 99,441 rows; 96,096 distinct customer_unique_id.
 
-**Means :** Customer ID column is order ID as per the description of the kaggle data.
+**Means :** customer_id is created for each order, so it identifies an order, not a person. The Kaggle data description says so, and F8 confirms it from the data.
 
 **Action :** Do not use customer_id to count or identify customers.
 
-### F6 - repeated customer_unique_id
+### F6 - 2,997 customers (3.1%) placed more than one order
 
 **Table :** olist_customers_dataset.csv.
 
-**Checked :**  Counted customer_unique_id values appearing on more than one row.
+**Checked :** Counted customer_unique_id values appearing on more than one row.
 
 **Found :** 2,997 of 96,096 customer_unique_id values (3.1%) appear on more than one row.
 
-**Means :** customer_unique_id repeats within this table while customer_id does not. It is one row per order verified. (See F8)
+**Means :** One row is one order (F8), so these 2,997 customers placed more than one order. customer_id cannot show this, because a new one is created for every order.
 
 **Action :** Group on customer_unique_id, not customer_id, for any customer-level count or aggregation — the two differ by 3,345 (99,441 vs 96,096).
 
@@ -578,16 +604,64 @@ carrier and customer timestamps missing), giving 29 distinct.
 
 **Action :** Calculate product and seller scores from delivered orders only, and report scores for undelivered orders as their own number. Show the share of 4–5 and 1–2 scores next to the average. Add a DQ check that review_score is always between 1 and 5; today all rows pass.
 
-## 3.Open Questions
+### F40 - 26% of geolocation rows are exact copies, and zip prefixes still repeat without them
+
+**Table :** olist_geolocation_dataset.csv
+
+**Checked :** Counted rows that exactly repeat an earlier row (all 5 columns the same). Then counted rows per zip prefix, first on all rows and then with the exact copies removed.
+
+**Found :** 261,831 of 1,000,163 rows (26%) are exact copies of another row; 738,332 rows are left without them. Rows per zip prefix, all rows: median 29, average 53, largest 1,146. Without the copies: median 23, average 39, largest 779. All 19,015 zip prefixes remain either way.
+
+**Means :** The copies add no information: removing them loses nothing, because each one repeats a row that stays. But even without them, one zip prefix has up to 779 rows, so this table is not one row per zip prefix. Joining customers or sellers to it on zip prefix would multiply their rows.
+
+**Action :** In Silver, drop exact copies, then reduce the table to one row per zip prefix (for example the median latitude and longitude) before joining it to customers or sellers. Add DQ checks: count exact copies (today 261,831) and check there is one row per zip prefix after the reduction.
+
+### F41 - 8 zip prefixes appear in two states, each because of one stray row
+
+**Table :** olist_geolocation_dataset.csv
+
+**Checked :** Counted distinct states per zip prefix, then counted rows per state for the prefixes with more than one.
+
+**Found :** 8 of 19,015 zip prefixes have two states. In each one, one state has a single row and the other has 12 to 179 rows: 02116 (SP 12, RN 1), 04011 (SP 178, AC 1), 21550 (RJ 170, AC 1), 23056 (RJ 60, AC 1), 72915 (GO 40, DF 1), 78557 (MT 96, RO 1), 79750 (MS 179, RS 1), 80630 (PR 122, SC 1).
+
+**Means :** A zip prefix belongs to one state, so in each of these 8 the single row is almost certainly the mistake. Brazil gives out zip codes in ranges per state (external fact, Correios), and in all 8 the state with more rows is the one that owns the range. If the table is reduced to one row per prefix by taking any row, these prefixes can end up in the wrong state.
+
+**Action :** When reducing the table to one row per zip prefix (F40), take the state with the most rows for that prefix. Add a DQ check that counts zip prefixes with more than one state; today it is 8, so it should warn if this goes up.
+
+### F42 - 45% of zip prefixes have more than one city name, mostly the same city with and without accents
+
+**Table :** olist_geolocation_dataset.csv
+
+**Checked :** Counted distinct city names per zip prefix and looked at a random sample of 5. Then removed accents from the city names in a separate column (the original is unchanged), counted again, and looked at a sample of the prefixes that still had more than one name.
+
+**Found :** 8,556 of 19,015 zip prefixes (45%) have more than one city name: 8,265 have 2, 255 have 3, 27 have 4 and 9 have 5. Each of the 5 sampled prefixes had the same city written with and without accents, such as "sao paulo" (76 rows) and "são paulo" (14). With accents removed, distinct city names drop from 8,011 to 5,968, and prefixes with more than one name drop from 8,556 to 550, so 8,006 (94%) differed only by accents. A sample of 5 of the 550 showed three other kinds: punctuation ("santa barbara d'oeste", "d oeste", "doeste"), one stray row naming a nearby city (nilopolis 199 rows, rio de janeiro 1), and a district written instead of its city (pipa and tibau do sul; ceilandia and brasilia).
+
+**Means :** Most of these are one city written two ways, the same kind of problem as F4 in sellers. Grouping on the raw name splits one city into several, so São Paulo is counted under two names. Removing accents fixes 94% but not the rest, and picking the most common name per prefix is not always right either: in 59179 it would give pipa, a district of tibau do sul (external fact).
+
+**Action :** In Silver, clean city names with one rule shared by geolocation, customers and sellers: lowercase, remove accents, and make apostrophes and spaces consistent. When reducing geolocation to one row per zip prefix (F40), keep the most common cleaned name, and correct district names with the municipality list from F4. Join on zip prefix, never on city name. Add a DQ check that counts prefixes with more than one cleaned city name; today it is 550.
+
+### F43 - 278 orders and 7 sellers have a zip prefix with no location
+
+**Table :** olist_geolocation_dataset.csv, olist_customers_dataset.csv, olist_sellers_dataset.csv
+
+**Checked :** Compared the zip prefixes in customers and sellers with those in geolocation, both ways, then counted the customer and seller rows whose prefix has no match.
+
+**Found :** 157 of 14,994 customer zip prefixes and 7 of 2,246 seller zip prefixes are not in geolocation. They cover 278 customer rows, which are 278 orders because each customer_id is one order (F8), and 7 sellers. In the other direction, 4,099 of the 19,015 geolocation prefixes are not used by any customer or seller.
+
+**Means :** 99.7% of orders and 99.8% of sellers can be given coordinates. The rest still have their own city and state, because the customers and sellers tables have no nulls, so only latitude and longitude are missing. The 4,099 unused prefixes do no harm: geolocation simply covers more zip prefixes than customers and sellers use.
+
+**Action :** Join customers and sellers to the reduced geolocation table (F40) with a left join, so the 278 orders and 7 sellers stay with empty coordinates; never use an inner join here. In Silver, add a has_location flag. Add DQ checks that count customer and seller zip prefixes with no location; today 157 (278 orders) and 7, so they should warn if these go up.
+
+## 3. Open Questions
 
 ### Q1 - Do all 32,951 product_ids in items exist in the products table?
 **Answered (F19):** yes — all 32,951 match, in both directions.
 
 ### Q2 - Why do 6 'unavailable' orders have items?
-609 orders have status 'unavailable'; 603 of them have no items (F15).
+609 orders have status 'unavailable'; 603 of them have no items (F15). Next: look at the timestamps, items and payments of those 6 orders.
 
 ### Q3 - Is zero freight real (free shipping) or missing?
-383 rows in 339 orders (0.34% of rows) have freight_value 0.00, and they come from only 9 of 3,095 sellers. That concentration points to a seller-level practice such as free shipping rather than random gaps, but the items table alone can't confirm it.
+383 rows in 339 orders (0.34% of rows) have freight_value 0.00, and they come from only 9 of 3,095 sellers. That concentration points to a seller-level practice such as free shipping rather than random gaps, but the items table alone can't confirm it. Next: for these 9 sellers, compare their zero-freight rows with their other rows (dates, products, customer states).
 
 ### Q4 - Why do some shipping_limit_date values fall after the dataset ends?
 The max is 2020-04-09; the latest date in the orders table is 2018-11-12. Rows not yet counted or explained — check in Silver before any on-time dispatch metric uses this column.
@@ -597,3 +671,6 @@ The max is 2020-04-09; the latest date in the orders table is 2018-11-12. Rows n
 
 ### Q6 - Why do 85 review creation dates have a time part?
 All other 99,139 creation dates are at midnight (see F35). Next: look at the times and dates of those 85 rows, and compare the dates with when Brazil's clocks moved forward for daylight saving in 2016 and 2017.
+
+### Q7 - How many geolocation points fall outside Brazil?
+describe() shows latitudes up to 45.07 and longitudes from -101.47 to 121.11, while Brazil lies roughly between latitude +5 and -34 and longitude -74 and -35 (external fact). These rows are not counted yet. Check before any map or distance metric uses the coordinates; the median point per zip prefix (F40 Action) limits their effect.
